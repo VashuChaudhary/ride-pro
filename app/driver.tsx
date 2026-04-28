@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, TextInput, Alert, KeyboardAvoidingView, Platform } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, TextInput, Alert, KeyboardAvoidingView, Platform } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import MapComponent from '../components/MapComponent';
 import { useRouter } from 'expo-router';
 import { useRide } from '../context/RideContext';
@@ -7,7 +8,7 @@ import { getRoadRoute } from '../utils/locationUtils';
 
 export default function DriverApp() {
   const router = useRouter();
-  const { rideState, setRideState, pickup, dropoff, passengerName, rideOtp } = useRide();
+  const { rideState, setRideState, pickup, dropoff, passengerName, rideOtp, isFemaleOnly, driverName, activeDriverGender, setActiveDriverGender, addRideToHistory, driverLocation, setDriverLocation, driverWallet } = useRide();
   const [routeCoords, setRouteCoords] = useState<any[]>([]);
   const [inputOtp, setInputOtp] = useState('');
 
@@ -16,6 +17,50 @@ export default function DriverApp() {
       updateRoute();
     }
   }, [pickup, dropoff]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+
+    if (rideState === 'accepted' && pickup) {
+      setDriverLocation({
+        name: 'Driver',
+        latitude: pickup.latitude - 0.015,
+        longitude: pickup.longitude - 0.015,
+      });
+
+      interval = setInterval(() => {
+        setDriverLocation(prev => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            latitude: prev.latitude + (pickup.latitude - prev.latitude) * 0.15,
+            longitude: prev.longitude + (pickup.longitude - prev.longitude) * 0.15,
+          };
+        });
+      }, 1000);
+    } else if (rideState === 'arrived' && pickup) {
+      setDriverLocation({ ...pickup, name: 'Driver' });
+    } else if (rideState === 'ongoing' && routeCoords.length > 0) {
+      let currentIndex = 0;
+      interval = setInterval(() => {
+        if (currentIndex < routeCoords.length) {
+          const coord = routeCoords[currentIndex];
+          setDriverLocation({
+            name: 'Driver',
+            latitude: coord.latitude,
+            longitude: coord.longitude,
+          });
+          currentIndex += Math.max(1, Math.floor(routeCoords.length / 15));
+        }
+      }, 1000);
+    } else if (rideState === 'idle') {
+      setDriverLocation(null);
+    }
+
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [rideState, pickup, routeCoords]);
 
   const updateRoute = async () => {
     const coords = await getRoadRoute(
@@ -34,6 +79,10 @@ export default function DriverApp() {
     }
   };
 
+  const isExcludedFromRide = rideState === 'searching' && isFemaleOnly && activeDriverGender !== 'female';
+  const showIdle = rideState === 'idle' || isExcludedFromRide;
+  const showRequest = rideState === 'searching' && !isExcludedFromRide;
+
   return (
     <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{flex: 1}}>
     <View style={styles.container}>
@@ -42,16 +91,37 @@ export default function DriverApp() {
         pickup={pickup} 
         dropoff={dropoff} 
         routeCoordinates={routeCoords}
+        driverLocation={driverLocation}
       />
       
       <SafeAreaView style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
+        <View style={styles.headerRow}>
+          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <View style={{flexDirection: 'row', alignItems: 'center'}}>
+            <View style={styles.walletBadge}>
+              <Text style={styles.walletEmoji}>💳</Text>
+              <Text style={styles.walletText}>₹{driverWallet}</Text>
+            </View>
+            <TouchableOpacity 
+              style={styles.driverProfileBadge} 
+              onPress={() => setActiveDriverGender(activeDriverGender === 'male' ? 'female' : 'male')}
+            >
+               <Text style={{fontSize: 16}}>{activeDriverGender === 'female' ? '👩' : '👨'}</Text>
+               <View style={{marginLeft: 8}}>
+                  <Text style={{fontWeight: 'bold', fontSize: 14}}>{driverName}</Text>
+                  <Text style={{fontSize: 10, color: activeDriverGender === 'female' ? '#ff4081' : '#666', fontWeight: 'bold'}}>
+                    {activeDriverGender === 'female' ? 'Female' : 'Male'}
+                  </Text>
+               </View>
+            </TouchableOpacity>
+          </View>
+        </View>
       </SafeAreaView>
 
       <View style={styles.bottomSheet}>
-        {rideState === 'idle' && (
+        {showIdle && (
           <View style={styles.centerContent}>
             <View style={styles.statusBadge}>
               <Text style={styles.statusText}>Online</Text>
@@ -61,7 +131,7 @@ export default function DriverApp() {
           </View>
         )}
 
-        {rideState === 'searching' && (
+        {showRequest && (
           <View>
             <View style={styles.requestBadge}>
               <Text style={styles.requestBadgeText}>New Request</Text>
@@ -127,8 +197,20 @@ export default function DriverApp() {
         {rideState === 'completed' && (
           <View style={styles.centerContent}>
             <Text style={styles.sheetTitle}>Ride Completed!</Text>
-            <Text style={styles.subtitle}>Earnings: ₹150 added to wallet</Text>
-            <TouchableOpacity style={styles.primaryButton} onPress={() => setRideState('idle')}>
+            <Text style={styles.subtitle}>Payment received. Earnings added to wallet.</Text>
+            <TouchableOpacity style={styles.primaryButton} onPress={() => {
+              if (pickup && dropoff) {
+                addRideToHistory({
+                  id: Date.now().toString() + '-d',
+                  role: 'driver',
+                  pickup,
+                  dropoff,
+                  fare: 150,
+                  date: new Date().toLocaleDateString()
+                });
+              }
+              setRideState('idle');
+            }}>
               <Text style={styles.primaryButtonText}>Go Online</Text>
             </TouchableOpacity>
           </View>
@@ -142,9 +224,14 @@ export default function DriverApp() {
 const styles = StyleSheet.create({
   container: { flex: 1 },
   map: { flex: 1 },
-  header: { position: 'absolute', top: 50, left: 20, zIndex: 10 },
+  header: { position: 'absolute', top: 50, left: 20, right: 20, zIndex: 10 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   backButton: { backgroundColor: '#fff', padding: 12, borderRadius: 30, elevation: 10 },
   backText: { fontWeight: 'bold' },
+  driverProfileBadge: { backgroundColor: '#fff', paddingHorizontal: 15, paddingVertical: 8, borderRadius: 30, elevation: 10, flexDirection: 'row', alignItems: 'center' },
+  walletBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 30, elevation: 10, marginRight: 10 },
+  walletEmoji: { fontSize: 18, marginRight: 5 },
+  walletText: { fontWeight: '800', fontSize: 16, color: '#2e7d32' },
   bottomSheet: {
     position: 'absolute',
     bottom: 0,

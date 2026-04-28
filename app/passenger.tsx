@@ -1,14 +1,16 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, SafeAreaView, Alert, ScrollView, Modal, TextInput, ActivityIndicator, Image } from 'react-native';
 import * as Location from 'expo-location';
+import { useRouter, useLocalSearchParams } from 'expo-router';
+import React, { useEffect, useRef, useState } from 'react';
+import { ActivityIndicator, Alert, Modal, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import MapComponent from '../components/MapComponent';
-import { useRouter } from 'expo-router';
-import { useRide, LocationData } from '../context/RideContext';
-import { searchAddress, getAddressFromCoords, getRoadRoute } from '../utils/locationUtils';
+import { LocationData, useRide } from '../context/RideContext';
+import { getAddressFromCoords, getRoadRoute, searchAddress } from '../utils/locationUtils';
+import { calculateDistance, predictRidePrice } from '../utils/mlPricingEngine';
 
 export default function PassengerApp() {
   const router = useRouter();
-  const { rideState, setRideState, pickup, setPickup, dropoff, setDropoff, driverName, rideOtp } = useRide();
+  const { rideState, setRideState, pickup, setPickup, dropoff, setDropoff, driverName, rideOtp, setRideOtp, isFemaleOnly, setIsFemaleOnly, activeDriverGender, addRideToHistory, isPoolEnabled, setIsPoolEnabled, poolMatch, setPoolMatch, driverLocation, passengerWallet, setPassengerWallet, setDriverWallet, schedules, addSchedule, toggleSchedule, deleteSchedule, savedPlaces, recentSearches, addRecentSearch } = useRide();
   
   const [modalVisible, setModalVisible] = useState(false);
   const [selectingFor, setSelectingFor] = useState<'pickup' | 'dropoff'>('pickup');
@@ -17,13 +19,146 @@ export default function PassengerApp() {
   const [isLoading, setIsLoading] = useState(false);
   const [routeCoords, setRouteCoords] = useState<any[]>([]);
   
+  const [splitUsers, setSplitUsers] = useState<string[]>([]);
+  const [newSplitUser, setNewSplitUser] = useState('');
+  const [isPaid, setIsPaid] = useState(false);
+  const [showQR, setShowQR] = useState(false);
+  const [scheduleModalVisible, setScheduleModalVisible] = useState(false);
+  const [selectedDays, setSelectedDays] = useState<number[]>([]);
+  const [selectedTime, setSelectedTime] = useState<string>('17:00');
+  const [notification, setNotification] = useState<{title: string, msg: string, visible: boolean}>({ title: '', msg: '', visible: false });
+  const [isPrebooked, setIsPrebooked] = useState(false);
+  const [weather, setWeather] = useState<'Clear' | 'Rain' | 'Storm' | 'Fog'>('Clear');
+  const [demandLevel, setDemandLevel] = useState<'Low' | 'Normal' | 'High' | 'Surge'>('Normal');
+  const [mlPrice, setMlPrice] = useState<{price: number, basePrice: number, explanation: string} | null>(null);
+  const params = useLocalSearchParams();
+  
+  const baseFare = mlPrice ? mlPrice.price : 150;
+  const discountedBase = baseFare - (poolMatch ? poolMatch.savedAmount : 0);
+  const totalFare = isPrebooked ? Math.round(discountedBase * 0.8) : Math.round(discountedBase);
+  
   const searchTimeout = useRef<NodeJS.Timeout | null>(null);
+
+  useEffect(() => {
+    if (params.autoBook === 'true' && params.pickupName && params.dropoffName) {
+      const presetPickup = savedPlaces.find(p => p.label === params.pickupName)?.location;
+      const presetDropoff = savedPlaces.find(p => p.label === params.dropoffName)?.location;
+      
+      if (presetPickup && presetDropoff) {
+        setPickup(presetPickup);
+        setDropoff(presetDropoff);
+        setTimeout(() => setRideState('searching'), 800);
+      }
+    }
+  }, [params.autoBook]);
 
   useEffect(() => {
     if (pickup && dropoff) {
       updateRoute();
+      
+      const dist = calculateDistance(pickup.latitude, pickup.longitude, dropoff.latitude, dropoff.longitude);
+      const prediction = predictRidePrice({
+        distanceKm: dist,
+        timeOfDayHour: new Date().getHours(),
+        weather,
+        demandLevel
+      });
+      setMlPrice(prediction);
+    } else {
+      setMlPrice(null);
     }
-  }, [pickup, dropoff]);
+  }, [pickup, dropoff, weather, demandLevel]);
+
+  useEffect(() => {
+    let poolTimer: NodeJS.Timeout;
+    if (rideState === 'ongoing' && isPoolEnabled && !poolMatch) {
+      poolTimer = setTimeout(() => {
+        setPoolMatch({
+          name: 'Rahul',
+          savedAmount: 60,
+          description: 'joining midway on your route'
+        });
+      }, 3000);
+    }
+    return () => clearTimeout(poolTimer);
+  }, [rideState, isPoolEnabled, poolMatch]);
+
+  useEffect(() => {
+    let title = '';
+    let msg = '';
+    
+    switch (rideState) {
+      case 'searching':
+        title = 'Looking for Drivers';
+        msg = 'Notifying nearby drivers in your area...';
+        break;
+      case 'accepted':
+        title = 'Driver Assigned!';
+        msg = `${driverName} is riding towards you.`;
+        break;
+      case 'arrived':
+        title = 'Driver Arrived';
+        msg = `${driverName} has reached the pickup location.`;
+        break;
+      case 'ongoing':
+        title = 'Ride Started';
+        msg = 'You are heading to your destination.';
+        break;
+      case 'completed':
+        title = 'Ride Completed';
+        msg = 'You have reached your destination.';
+        break;
+      default:
+        return; // don't show for idle
+    }
+
+    setNotification({ title, msg, visible: true });
+    
+    const timer = setTimeout(() => {
+      setNotification(prev => ({ ...prev, visible: false }));
+    }, 4000);
+
+    return () => clearTimeout(timer);
+  }, [rideState, driverName]);
+
+  const toggleDay = (day: number) => {
+    if (selectedDays.includes(day)) {
+      setSelectedDays(selectedDays.filter(d => d !== day));
+    } else {
+      setSelectedDays([...selectedDays, day]);
+    }
+  };
+
+  const saveSchedule = () => {
+    if (!pickup || !dropoff || selectedDays.length === 0) {
+      Alert.alert('Error', 'Please select pickup, dropoff, and at least one day.');
+      return;
+    }
+    addSchedule({
+      id: Date.now().toString(),
+      pickup,
+      dropoff,
+      days: selectedDays,
+      time: selectedTime,
+      isActive: true
+    });
+    setScheduleModalVisible(false);
+    Alert.alert('Success', 'Your ride has been scheduled! We will notify you 15 minutes before the scheduled time.');
+  };
+
+  const simulateScheduledRide = (schedule: any) => {
+    Alert.alert(
+      '📅 Upcoming Scheduled Ride', 
+      `Your daily scheduled ride from ${schedule.pickup.name} to ${schedule.dropoff.name} is in 15 minutes. Auto-booking now...`,
+      [{ text: 'OK', onPress: () => {
+        setPickup(schedule.pickup);
+        setDropoff(schedule.dropoff);
+        const newOtp = Math.floor(1000 + Math.random() * 9000).toString();
+        setRideOtp(newOtp);
+        setRideState('searching');
+      }}]
+    );
+  };
 
   const updateRoute = async () => {
     try {
@@ -87,6 +222,7 @@ export default function PassengerApp() {
   };
 
   const selectLocation = (loc: LocationData) => {
+    addRecentSearch(loc);
     if (selectingFor === 'pickup') setPickup(loc);
     else setDropoff(loc);
     setModalVisible(false);
@@ -99,52 +235,143 @@ export default function PassengerApp() {
         pickup={pickup} 
         dropoff={dropoff} 
         routeCoordinates={routeCoords}
+        driverLocation={driverLocation}
       />
       
       <SafeAreaView style={styles.header}>
-        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
-          <Text style={styles.backText}>← Back</Text>
-        </TouchableOpacity>
+        <View style={styles.headerRow}>
+          <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+            <Text style={styles.backText}>← Back</Text>
+          </TouchableOpacity>
+          <View style={styles.walletBadge}>
+            <Text style={styles.walletEmoji}>💳</Text>
+            <Text style={styles.walletText}>₹{passengerWallet}</Text>
+          </View>
+        </View>
       </SafeAreaView>
+
+      {notification.visible && (
+        <View style={styles.notificationBanner}>
+          <Text style={styles.notificationEmoji}>🔔</Text>
+          <View style={{flex: 1}}>
+            <Text style={styles.notificationTitle}>{notification.title}</Text>
+            <Text style={styles.notificationMsg}>{notification.msg}</Text>
+          </View>
+        </View>
+      )}
+
+      {(rideState === 'accepted' || rideState === 'arrived' || rideState === 'ongoing') && (
+        <View style={styles.safetyToolkit}>
+          <TouchableOpacity 
+            style={[styles.safetyButton, { backgroundColor: '#d32f2f' }]} 
+            onPress={() => Alert.alert('🚨 SOS Emergency', 'Emergency services and your trusted contacts have been alerted with your live location. Help is on the way!')}
+          >
+            <Text style={styles.safetyEmoji}>🚨</Text>
+            <Text style={styles.safetyText}>SOS</Text>
+          </TouchableOpacity>
+          
+          <TouchableOpacity 
+            style={[styles.safetyButton, { backgroundColor: '#1976d2' }]} 
+            onPress={() => Alert.alert('🔗 Ride Shared', 'A live tracking link has been sent to your emergency contacts.')}
+          >
+            <Text style={styles.safetyEmoji}>🔗</Text>
+            <Text style={styles.safetyText}>Share</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       <View style={styles.bottomSheet}>
         {rideState === 'idle' && (
           <View>
             <Text style={styles.sheetTitle}>Ready to ride?</Text>
             
-            <TouchableOpacity style={styles.locationInput} onPress={() => openSelector('pickup')}>
-              <View style={styles.inputRow}>
+            <View style={styles.routeCard}>
+              <TouchableOpacity style={styles.routeRow} onPress={() => openSelector('pickup')}>
                 <View style={[styles.dot, { backgroundColor: '#2e7d32' }]} />
-                <Text style={pickup ? styles.locationText : styles.placeholderText} numberOfLines={1}>
-                  {pickup ? pickup.name : 'Choose Pickup'}
-                </Text>
-              </View>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.locationInput} onPress={() => openSelector('dropoff')}>
-              <View style={styles.inputRow}>
+                <Text style={pickup ? styles.locationText : styles.placeholderText} numberOfLines={1}>{pickup ? pickup.name : 'Choose Pickup'}</Text>
+              </TouchableOpacity>
+              <View style={styles.routeLine} />
+              <TouchableOpacity style={styles.routeRow} onPress={() => openSelector('dropoff')}>
                 <View style={[styles.dot, { backgroundColor: '#d32f2f' }]} />
-                <Text style={dropoff ? styles.locationText : styles.placeholderText} numberOfLines={1}>
-                  {dropoff ? dropoff.name : 'Where to?'}
-                </Text>
+                <Text style={dropoff ? styles.locationText : styles.placeholderText} numberOfLines={1}>{dropoff ? dropoff.name : 'Where to?'}</Text>
+              </TouchableOpacity>
+            </View>
+
+            {pickup && dropoff && mlPrice && (
+              <View style={styles.mlCard}>
+                <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}}>
+                  <View style={{flex: 1, paddingRight: 10}}>
+                    <Text style={{fontWeight: '900', color: '#1E88E5', fontSize: 14}}>🤖 AI Pricing</Text>
+                    <Text style={{fontSize: 10, color: '#666', fontStyle: 'italic'}} numberOfLines={2}>{mlPrice.explanation}</Text>
+                  </View>
+                  <Text style={{fontWeight: '900', fontSize: 24}}>₹{mlPrice.price}</Text>
+                </View>
+                
+                <View style={{flexDirection: 'row', marginTop: 10}}>
+                  <TouchableOpacity onPress={() => setWeather(weather === 'Clear' ? 'Rain' : (weather === 'Rain' ? 'Storm' : 'Clear'))} style={[styles.mlCompactTag, weather !== 'Clear' && styles.mlCompactTagActive]}>
+                    <Text style={[styles.mlCompactTagText, weather !== 'Clear' && styles.mlTagTextActive]}>{weather === 'Clear' ? '☀️ Weather' : (weather === 'Rain' ? '🌧️ Rain' : '⛈️ Storm')}</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity onPress={() => setDemandLevel(demandLevel === 'Normal' ? 'Surge' : (demandLevel === 'Surge' ? 'Low' : 'Normal'))} style={[styles.mlCompactTag, demandLevel !== 'Normal' && styles.mlCompactTagActive]}>
+                    <Text style={[styles.mlCompactTagText, demandLevel !== 'Normal' && styles.mlTagTextActive]}>{demandLevel === 'Normal' ? '📊 Demand' : (demandLevel === 'Low' ? '📉 Low' : '📈 Surge')}</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
-            </TouchableOpacity>
+            )}
+
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+              <TouchableOpacity style={[styles.chip, isFemaleOnly && styles.chipActive]} onPress={() => setIsFemaleOnly(!isFemaleOnly)}>
+                <Text style={[styles.chipText, isFemaleOnly && styles.chipTextActive]}>👩 Women Only</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.chip, isPoolEnabled && styles.chipActive]} onPress={() => setIsPoolEnabled(!isPoolEnabled)}>
+                <Text style={[styles.chipText, isPoolEnabled && styles.chipTextActive]}>👥 Pool (Save)</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.chip, isPrebooked && styles.chipActive]} onPress={() => setIsPrebooked(!isPrebooked)}>
+                <Text style={[styles.chipText, isPrebooked && styles.chipTextActive]}>⏳ Pre-book (-20%)</Text>
+              </TouchableOpacity>
+              <TouchableOpacity style={[styles.chip, (!pickup || !dropoff) && {opacity: 0.5}]} onPress={() => setScheduleModalVisible(true)} disabled={!pickup || !dropoff}>
+                <Text style={styles.chipText}>📅 Schedule</Text>
+              </TouchableOpacity>
+            </ScrollView>
 
             <TouchableOpacity 
-              style={[styles.primaryButton, (!pickup || !dropoff) && styles.disabledButton]} 
-              onPress={() => setRideState('searching')}
+              style={[styles.primaryButton, (!pickup || !dropoff) && styles.disabledButton, {marginTop: 10}]} 
+              onPress={() => {
+                const newOtp = Math.floor(1000 + Math.random() * 9000).toString();
+                setRideOtp(newOtp);
+                setRideState('searching');
+              }}
               disabled={!pickup || !dropoff}
             >
               <Text style={styles.primaryButtonText}>Find Rides</Text>
             </TouchableOpacity>
+
+            {schedules.length > 0 && (
+              <View style={styles.schedulesContainer}>
+                <Text style={styles.schedulesTitle}>Your Scheduled Rides</Text>
+                {schedules.map(s => (
+                  <View key={s.id} style={styles.scheduleCard}>
+                    <View style={{flex: 1}}>
+                      <Text style={{fontWeight: 'bold'}} numberOfLines={1}>{s.pickup.name} → {s.dropoff.name}</Text>
+                      <Text style={{color: '#666', fontSize: 12}}>
+                        {s.days.map(d => ['Su','Mo','Tu','We','Th','Fr','Sa'][d]).join(', ')} • {s.time}
+                      </Text>
+                    </View>
+                    <Switch value={s.isActive} onValueChange={() => toggleSchedule(s.id)} />
+                    <TouchableOpacity onPress={() => simulateScheduledRide(s)} style={{marginLeft: 10, backgroundColor: '#000', padding: 8, borderRadius: 8}}>
+                      <Text style={{color: '#fff', fontSize: 10}}>Simulate</Text>
+                    </TouchableOpacity>
+                  </View>
+                ))}
+              </View>
+            )}
           </View>
         )}
 
         {rideState === 'searching' && (
           <View style={styles.centerContent}>
             <ActivityIndicator size="large" color="#000" />
-            <Text style={styles.searchingTitle}>Searching for rides...</Text>
-            <Text style={styles.subtitle}>Connecting you to nearby drivers in Delhi</Text>
+            <Text style={styles.searchingTitle}>{isPrebooked ? 'Scheduling your ride...' : 'Searching for rides...'}</Text>
+            <Text style={styles.subtitle}>{isPrebooked ? 'Reserving a driver for 30 mins from now.' : 'Connecting you to nearby drivers in Delhi'}</Text>
             <TouchableOpacity style={styles.secondaryButton} onPress={() => setRideState('idle')}>
               <Text style={styles.secondaryButtonText}>Cancel Request</Text>
             </TouchableOpacity>
@@ -166,9 +393,16 @@ export default function PassengerApp() {
 
             <View style={styles.driverCard}>
               <View style={styles.driverInfoRow}>
-                <View style={styles.avatarPlaceholder}><Text>👤</Text></View>
+                <View style={styles.avatarPlaceholder}><Text>{activeDriverGender === 'female' ? '👩' : '👨'}</Text></View>
                 <View style={{flex: 1, marginLeft: 15}}>
-                  <Text style={styles.driverNameText}>{driverName}</Text>
+                  <View style={{flexDirection: 'row', alignItems: 'center'}}>
+                    <Text style={styles.driverNameText}>{driverName}</Text>
+                    {(isFemaleOnly && activeDriverGender === 'female') && (
+                      <View style={{backgroundColor: '#fce4ec', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 10, marginLeft: 8, borderWidth: 1, borderColor: '#ff4081'}}>
+                        <Text style={{color: '#ff4081', fontSize: 10, fontWeight: 'bold'}}>✓ Verified Female</Text>
+                      </View>
+                    )}
+                  </View>
                   <Text style={styles.carNumberText}>Rating: 4.9 ⭐</Text>
                 </View>
                 <TouchableOpacity style={styles.callButton}><Text>📞</Text></TouchableOpacity>
@@ -198,6 +432,15 @@ export default function PassengerApp() {
             <Text style={styles.statusBadgeOngoing}>Ride in Progress</Text>
             <Text style={styles.sheetTitle}>Heading to Destination</Text>
             <Text style={styles.subtitle} numberOfLines={1}>Destination: {dropoff?.name}</Text>
+            
+            {poolMatch && (
+              <View style={styles.poolBanner}>
+                <Text style={styles.poolBannerTitle}>👥 Co-Rider Found!</Text>
+                <Text style={styles.poolBannerText}>{poolMatch.name} is {poolMatch.description}.</Text>
+                <Text style={styles.poolBannerSave}>You save ₹{poolMatch.savedAmount} on this ride!</Text>
+              </View>
+            )}
+
             <View style={styles.driverCard}>
               <Text style={styles.driverNameText}>Driving with {driverName}</Text>
             </View>
@@ -205,18 +448,131 @@ export default function PassengerApp() {
         )}
 
         {rideState === 'completed' && (
-          <View style={styles.centerContent}>
+          <View style={{ width: '100%', alignItems: 'center' }}>
             <Text style={styles.completionEmoji}>🏁</Text>
             <Text style={styles.sheetTitle}>Ride Completed!</Text>
-            <Text style={styles.subtitle}>Hope you enjoyed your trip in Delhi!</Text>
-            <TouchableOpacity style={styles.primaryButton} onPress={() => {
-              setRideState('idle');
-              setPickup(null);
-              setDropoff(null);
-              setRouteCoords([]);
-            }}>
-              <Text style={styles.primaryButtonText}>Done</Text>
-            </TouchableOpacity>
+            
+            <View style={styles.fareContainer}>
+              <Text style={styles.fareText}>Total Fare: ₹{totalFare}</Text>
+              {isPrebooked && (
+                <View style={{backgroundColor: '#fff3e0', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10, marginTop: 5}}>
+                  <Text style={{color: '#f57c00', fontSize: 12, fontWeight: 'bold'}}>20% Pre-booking Discount Applied!</Text>
+                </View>
+              )}
+              <Text style={styles.splitText}>
+                {splitUsers.length > 0 
+                  ? `Per Person: ₹${(totalFare / (splitUsers.length + 1)).toFixed(2)}` 
+                  : `You pay: ₹${totalFare}`}
+              </Text>
+            </View>
+
+            {!isPaid ? (
+              <View style={styles.paymentSection}>
+                <Text style={styles.paymentSubtitle}>Please pay the driver</Text>
+                
+                {showQR ? (
+                  <View style={styles.qrContainer}>
+                    <View style={styles.qrBox}>
+                      <Text style={{fontSize: 100, lineHeight: 120}}>🔲</Text>
+                      <Text style={styles.qrText}>Scan to Pay ₹{totalFare}</Text>
+                    </View>
+                    <TouchableOpacity style={styles.secondaryButton} onPress={() => setShowQR(false)}>
+                      <Text style={styles.secondaryButtonText}>Back to options</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={[styles.primaryButton, {marginTop: 15}]} onPress={() => {
+                      setDriverWallet(w => w + totalFare);
+                      setIsPaid(true);
+                      setShowQR(false);
+                      Alert.alert('Payment Successful', `₹${totalFare} paid to ${driverName} via UPI.`);
+                    }}>
+                      <Text style={styles.primaryButtonText}>Simulate Scan Success</Text>
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <View style={styles.paymentOptionsRow}>
+                    <TouchableOpacity 
+                      style={styles.paymentMethodCard}
+                      onPress={() => {
+                        if (passengerWallet >= totalFare) {
+                          setPassengerWallet(w => w - totalFare);
+                          setDriverWallet(w => w + totalFare);
+                          setIsPaid(true);
+                          Alert.alert('Wallet Payment Successful', `₹${totalFare} deducted from your wallet.`);
+                        } else {
+                          Alert.alert('Insufficient Balance', 'Please use another payment method.');
+                        }
+                      }}
+                    >
+                      <Text style={styles.paymentEmoji}>💳</Text>
+                      <Text style={styles.paymentMethodText}>Wallet (₹{passengerWallet})</Text>
+                    </TouchableOpacity>
+
+                    <TouchableOpacity 
+                      style={styles.paymentMethodCard}
+                      onPress={() => setShowQR(true)}
+                    >
+                      <Text style={styles.paymentEmoji}>📱</Text>
+                      <Text style={styles.paymentMethodText}>Show QR</Text>
+                    </TouchableOpacity>
+                  </View>
+                )}
+              </View>
+            ) : (
+              <View style={{width: '100%'}}>
+                <Text style={styles.successText}>✅ Payment Completed</Text>
+                
+                <View style={styles.splitInputContainer}>
+                  <TextInput
+                    style={styles.splitInput}
+                    placeholder="Add co-passenger name..."
+                    value={newSplitUser}
+                    onChangeText={setNewSplitUser}
+                  />
+                  <TouchableOpacity 
+                    style={styles.addButton}
+                    onPress={() => {
+                      if (newSplitUser.trim()) {
+                        setSplitUsers([...splitUsers, newSplitUser.trim()]);
+                        setNewSplitUser('');
+                      }
+                    }}
+                  >
+                    <Text style={styles.addButtonText}>Add</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {splitUsers.length > 0 && (
+                  <View style={styles.splitUsersList}>
+                    <Text style={styles.splitUsersTitle}>Splitting with:</Text>
+                    <Text style={styles.splitUsersNames}>{splitUsers.join(', ')}</Text>
+                  </View>
+                )}
+
+                <TouchableOpacity style={styles.primaryButton} onPress={() => {
+                  if (pickup && dropoff) {
+                    addRideToHistory({
+                      id: Date.now().toString() + '-p',
+                      role: 'passenger',
+                      pickup,
+                      dropoff,
+                      fare: totalFare,
+                      splitUsers: splitUsers.length > 0 ? splitUsers : undefined,
+                      date: new Date().toLocaleDateString()
+                    });
+                  }
+                  setRideState('idle');
+                  setPickup(null);
+                  setDropoff(null);
+                  setRouteCoords([]);
+                  setSplitUsers([]);
+                  setPoolMatch(null);
+                  setIsPaid(false);
+                  setIsPrebooked(false);
+                }}>
+                  <Text style={styles.primaryButtonText}>Done</Text>
+                </TouchableOpacity>
+              </View>
+            )}
           </View>
         )}
       </View>
@@ -245,6 +601,40 @@ export default function PassengerApp() {
                 </TouchableOpacity>
               )}
 
+              {!searchQuery && (
+                <View style={styles.savedSection}>
+                  <Text style={styles.sectionTitle}>Saved Places</Text>
+                  <View style={styles.savedPlacesRow}>
+                    {savedPlaces.map(place => (
+                      <TouchableOpacity 
+                        key={place.id} 
+                        style={styles.savedPlaceCard} 
+                        onPress={() => selectLocation(place.location)}
+                      >
+                        <Text style={styles.savedPlaceIcon}>{place.icon}</Text>
+                        <Text style={styles.savedPlaceLabel}>{place.label}</Text>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+
+                  {recentSearches.length > 0 && (
+                    <View style={{marginTop: 20}}>
+                      <Text style={styles.sectionTitle}>Recent Searches</Text>
+                      {recentSearches.map((loc, index) => (
+                        <TouchableOpacity 
+                          key={index} 
+                          style={styles.recentSearchItem} 
+                          onPress={() => selectLocation(loc)}
+                        >
+                          <Text style={{fontSize: 20, marginRight: 15}}>🕒</Text>
+                          <Text style={styles.recentSearchName} numberOfLines={1}>{loc.name}</Text>
+                        </TouchableOpacity>
+                      ))}
+                    </View>
+                  )}
+                </View>
+              )}
+
               {isLoading ? (
                 <ActivityIndicator style={{marginTop: 20}} />
               ) : (
@@ -262,6 +652,48 @@ export default function PassengerApp() {
           </SafeAreaView>
         </View>
       </Modal>
+
+      <Modal visible={scheduleModalVisible} animationType="slide" transparent={true}>
+        <View style={styles.modalOverlay}>
+          <SafeAreaView style={styles.modalContainer}>
+            <View style={styles.modalHeader}>
+              <Text style={{fontSize: 20, fontWeight: 'bold', flex: 1, textAlign: 'center'}}>Schedule Ride</Text>
+              <TouchableOpacity onPress={() => setScheduleModalVisible(false)} style={styles.closeTextBtn}>
+                <Text style={{ fontWeight: 'bold' }}>Close</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={{padding: 20}}>
+              <Text style={{fontSize: 16, marginBottom: 10, fontWeight: '600'}}>Select Days</Text>
+              <View style={{flexDirection: 'row', justifyContent: 'space-between', marginBottom: 20}}>
+                {['S', 'M', 'T', 'W', 'T', 'F', 'S'].map((day, i) => (
+                  <TouchableOpacity 
+                    key={i} 
+                    onPress={() => toggleDay(i)}
+                    style={{width: 40, height: 40, borderRadius: 20, backgroundColor: selectedDays.includes(i) ? '#000' : '#f0f0f0', justifyContent: 'center', alignItems: 'center'}}
+                  >
+                    <Text style={{color: selectedDays.includes(i) ? '#fff' : '#000', fontWeight: 'bold'}}>{day}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <Text style={{fontSize: 16, marginBottom: 10, fontWeight: '600'}}>Select Time</Text>
+              <View style={{flexDirection: 'row', marginBottom: 30}}>
+                <TouchableOpacity onPress={() => setSelectedTime('09:00')} style={{flex: 1, padding: 15, backgroundColor: selectedTime === '09:00' ? '#000' : '#f0f0f0', borderRadius: 10, marginRight: 5, alignItems: 'center'}}>
+                  <Text style={{color: selectedTime === '09:00' ? '#fff' : '#000', fontWeight: 'bold'}}>Morning (9 AM)</Text>
+                </TouchableOpacity>
+                <TouchableOpacity onPress={() => setSelectedTime('17:00')} style={{flex: 1, padding: 15, backgroundColor: selectedTime === '17:00' ? '#000' : '#f0f0f0', borderRadius: 10, marginLeft: 5, alignItems: 'center'}}>
+                  <Text style={{color: selectedTime === '17:00' ? '#fff' : '#000', fontWeight: 'bold'}}>Evening (5 PM)</Text>
+                </TouchableOpacity>
+              </View>
+
+              <TouchableOpacity style={styles.primaryButton} onPress={saveSchedule}>
+                <Text style={styles.primaryButtonText}>Save Schedule</Text>
+              </TouchableOpacity>
+            </View>
+          </SafeAreaView>
+        </View>
+      </Modal>
+
     </View>
   );
 }
@@ -291,7 +723,9 @@ const styles = StyleSheet.create({
   dot: { width: 8, height: 8, borderRadius: 4, marginRight: 15 },
   locationText: { color: '#000', fontSize: 16, fontWeight: '500' },
   placeholderText: { color: '#888', fontSize: 16 },
-  primaryButton: { backgroundColor: '#000', padding: 18, borderRadius: 15, alignItems: 'center', marginTop: 10, width: '100%' },
+  switchContainer: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', backgroundColor: '#f9f9f9', padding: 15, borderRadius: 15, marginBottom: 15, borderWidth: 1, borderColor: '#eee' },
+  switchLabel: { fontSize: 16, fontWeight: '600', color: '#333' },
+  primaryButton: { backgroundColor: '#000', padding: 18, borderRadius: 15, alignItems: 'center', marginTop: 5, width: '100%' },
   disabledButton: { backgroundColor: '#ccc' },
   primaryButtonText: { color: '#fff', fontSize: 18, fontWeight: '700' },
   centerContent: { alignItems: 'center', padding: 10 },
@@ -322,4 +756,67 @@ const styles = StyleSheet.create({
   liveLocationText: { color: '#007AFF', fontWeight: 'bold', fontSize: 16 },
   resultItem: { padding: 20, borderBottomWidth: 1, borderBottomColor: '#eee' },
   resultName: { fontSize: 16, color: '#333' },
+  fareContainer: { backgroundColor: '#e8f5e9', padding: 15, borderRadius: 15, width: '100%', alignItems: 'center', marginBottom: 15 },
+  fareText: { fontSize: 20, fontWeight: 'bold', color: '#2e7d32' },
+  splitText: { fontSize: 16, color: '#2e7d32', marginTop: 5, fontWeight: '600' },
+  splitInputContainer: { flexDirection: 'row', width: '100%', marginBottom: 10 },
+  splitInput: { flex: 1, backgroundColor: '#f0f0f0', padding: 12, borderRadius: 10, marginRight: 10 },
+  addButton: { backgroundColor: '#000', paddingHorizontal: 20, justifyContent: 'center', borderRadius: 10 },
+  addButtonText: { color: '#fff', fontWeight: 'bold' },
+  splitUsersList: { width: '100%', backgroundColor: '#f9f9f9', padding: 12, borderRadius: 10, marginBottom: 15, borderWidth: 1, borderColor: '#eee' },
+  splitUsersTitle: { fontSize: 12, color: '#666', fontWeight: 'bold', marginBottom: 5 },
+  splitUsersNames: { fontSize: 14, color: '#333', fontWeight: '500' },
+  poolBanner: { backgroundColor: '#e8f5e9', padding: 15, borderRadius: 15, width: '100%', alignItems: 'center', marginVertical: 10, borderWidth: 1, borderColor: '#c8e6c9' },
+  poolBannerTitle: { fontSize: 16, fontWeight: 'bold', color: '#2e7d32', marginBottom: 5 },
+  poolBannerText: { fontSize: 14, color: '#333', textAlign: 'center' },
+  poolBannerSave: { fontSize: 14, fontWeight: 'bold', color: '#2e7d32', marginTop: 5 },
+  safetyToolkit: { position: 'absolute', top: 50, right: 20, zIndex: 10, alignItems: 'flex-end' },
+  safetyButton: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 20, marginBottom: 10, elevation: 5, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.2, shadowRadius: 3 },
+  safetyEmoji: { fontSize: 16, marginRight: 5 },
+  safetyText: { color: '#fff', fontWeight: 'bold', fontSize: 14 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', width: '100%' },
+  walletBadge: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#fff', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 30, elevation: 10, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 3 },
+  walletEmoji: { fontSize: 18, marginRight: 5 },
+  walletText: { fontWeight: '800', fontSize: 16, color: '#2e7d32' },
+  paymentSection: { width: '100%', alignItems: 'center' },
+  paymentSubtitle: { fontSize: 16, color: '#666', marginBottom: 15, fontWeight: '500' },
+  paymentOptionsRow: { flexDirection: 'row', justifyContent: 'space-between', width: '100%' },
+  paymentMethodCard: { flex: 1, backgroundColor: '#f9f9f9', padding: 20, borderRadius: 15, alignItems: 'center', marginHorizontal: 5, borderWidth: 1, borderColor: '#eee' },
+  paymentEmoji: { fontSize: 32, marginBottom: 10 },
+  paymentMethodText: { fontWeight: 'bold', color: '#333' },
+  successText: { color: '#2e7d32', fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 20 },
+  qrContainer: { alignItems: 'center', width: '100%' },
+  qrBox: { backgroundColor: '#f5f5f5', padding: 20, borderRadius: 20, alignItems: 'center', marginBottom: 15, width: 200, borderWidth: 2, borderColor: '#e0e0e0', borderStyle: 'dashed' },
+  qrText: { fontWeight: 'bold', marginTop: 10, color: '#333' },
+  schedulesContainer: { marginTop: 20, borderTopWidth: 1, borderTopColor: '#eee', paddingTop: 15 },
+  schedulesTitle: { fontSize: 16, fontWeight: 'bold', marginBottom: 10 },
+  scheduleCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f9f9f9', padding: 12, borderRadius: 10, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
+  savedSection: { padding: 20 },
+  sectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#666', marginBottom: 15 },
+  savedPlacesRow: { flexDirection: 'row', justifyContent: 'space-between' },
+  savedPlaceCard: { flex: 1, backgroundColor: '#f9f9f9', padding: 15, borderRadius: 15, alignItems: 'center', marginHorizontal: 5, borderWidth: 1, borderColor: '#eee' },
+  savedPlaceIcon: { fontSize: 24, marginBottom: 5 },
+  savedPlaceLabel: { fontWeight: 'bold', color: '#333' },
+  recentSearchItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: '#eee' },
+  recentSearchName: { fontSize: 16, color: '#333', flex: 1 },
+  notificationBanner: { position: 'absolute', top: 120, left: 20, right: 20, backgroundColor: '#333', padding: 15, borderRadius: 15, flexDirection: 'row', alignItems: 'center', zIndex: 100, elevation: 20, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5 },
+  notificationEmoji: { fontSize: 24, marginRight: 15 },
+  notificationTitle: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
+  notificationMsg: { color: '#ddd', fontSize: 14, marginTop: 2 },
+  mlCard: { backgroundColor: '#e3f2fd', padding: 15, borderRadius: 15, marginBottom: 15, borderWidth: 1, borderColor: '#bbdefb' },
+  mlTag: { backgroundColor: '#fff', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 15, borderWidth: 1, borderColor: '#ddd', flex: 1, marginHorizontal: 2, alignItems: 'center' },
+  mlTagActive: { backgroundColor: '#1E88E5', borderColor: '#1E88E5' },
+  mlTagText: { fontSize: 12, color: '#666', fontWeight: 'bold' },
+  mlTagTextActive: { color: '#fff' },
+  routeCard: { backgroundColor: '#f5f5f5', borderRadius: 15, padding: 15, marginBottom: 15 },
+  routeRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 5 },
+  routeLine: { width: 2, height: 20, backgroundColor: '#ddd', marginLeft: 3, marginVertical: 2 },
+  chipScroll: { flexDirection: 'row', marginBottom: 5 },
+  chip: { backgroundColor: '#f0f0f0', paddingHorizontal: 15, paddingVertical: 10, borderRadius: 20, marginRight: 10, height: 40, justifyContent: 'center' },
+  chipActive: { backgroundColor: '#000' },
+  chipText: { fontSize: 12, fontWeight: 'bold', color: '#333' },
+  chipTextActive: { color: '#fff' },
+  mlCompactTag: { backgroundColor: '#fff', paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: '#ddd', marginRight: 10 },
+  mlCompactTagActive: { backgroundColor: '#1E88E5', borderColor: '#1E88E5' },
+  mlCompactTagText: { fontSize: 10, color: '#666', fontWeight: 'bold' }
 });
