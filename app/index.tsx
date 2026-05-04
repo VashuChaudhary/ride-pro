@@ -3,14 +3,16 @@ import { View, Text, TextInput, TouchableOpacity, StyleSheet, KeyboardAvoidingVi
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useRide } from '../context/RideContext';
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword, GoogleAuthProvider, signInWithCredential } from 'firebase/auth';
+import { createUserWithEmailAndPassword, signInWithEmailAndPassword, GoogleAuthProvider, signInWithCredential, signInWithPopup } from 'firebase/auth';
 import { doc, setDoc, getDoc } from 'firebase/firestore';
 import { auth, db } from '../FirebaseConfig';
 import { GoogleSignin } from '@react-native-google-signin/google-signin';
 
-GoogleSignin.configure({
-  webClientId: '720508259433-nl75fq85odofnnvbmc22ms5c2fobds1t.apps.googleusercontent.com',
-});
+if (Platform.OS !== 'web') {
+  GoogleSignin.configure({
+    webClientId: '720508259433-nl75fq85odofnnvbmc22ms5c2fobds1t.apps.googleusercontent.com',
+  });
+}
 
 export default function AuthScreen() {
   const router = useRouter();
@@ -74,15 +76,26 @@ export default function AuthScreen() {
   const handleGoogleAuth = async () => {
     try {
       setIsLoading(true);
-      await GoogleSignin.hasPlayServices();
-      const userInfo = await GoogleSignin.signIn();
-      
-      const idToken = (userInfo as any).idToken || (userInfo as any).data?.idToken;
-      
-      if (!idToken) throw new Error("No ID token found from Google");
-      
-      const googleCredential = GoogleAuthProvider.credential(idToken);
-      const userCredential = await signInWithCredential(auth, googleCredential);
+      let userCredential;
+
+      if (Platform.OS === 'web') {
+        const provider = new GoogleAuthProvider();
+        // Force account selection
+        provider.setCustomParameters({
+          prompt: 'select_account'
+        });
+        userCredential = await signInWithPopup(auth, provider);
+      } else {
+        await GoogleSignin.hasPlayServices();
+        const userInfo = await GoogleSignin.signIn();
+        
+        const idToken = (userInfo as any).idToken || (userInfo as any).data?.idToken;
+        
+        if (!idToken) throw new Error("No ID token found from Google");
+        
+        const googleCredential = GoogleAuthProvider.credential(idToken);
+        userCredential = await signInWithCredential(auth, googleCredential);
+      }
       
       const userDoc = await getDoc(doc(db, 'users', userCredential.user.uid));
       
@@ -111,8 +124,11 @@ export default function AuthScreen() {
       router.replace('/dashboard');
     } catch (error: any) {
       console.error(error);
-      // In Expo Go, this will likely throw 'Module not found'.
-      alert('Google Sign-In Error: ' + error.message + "\n\nNote: Google Sign-In only works in the APK/Production build.");
+      if (Platform.OS === 'web') {
+        alert('Google Sign-In Error (Web): ' + error.message);
+      } else {
+        alert('Google Sign-In Error: ' + error.message + "\n\nNote: Google Sign-In only works in the APK/Production build.");
+      }
     } finally {
       setIsLoading(false);
     }
