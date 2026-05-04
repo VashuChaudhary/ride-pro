@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { StyleSheet, Text, View } from 'react-native';
 
 export default function MapComponent({ style, pickup, dropoff }: { style?: any, pickup?: any, dropoff?: any }) {
   return (
