@@ -1,8 +1,9 @@
+import { Platform } from 'react-native';
 import ReactNativeAsyncStorage from '@react-native-async-storage/async-storage';
 import { initializeApp } from "firebase/app";
 
 // @ts-expect-error - getReactNativePersistence is not typed correctly in the default exports, but works in Metro
-import { getReactNativePersistence, initializeAuth } from "firebase/auth";
+import { getReactNativePersistence, initializeAuth, getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -16,7 +17,11 @@ const firebaseConfig = {
 };
 
 export const app = initializeApp(firebaseConfig);
-export const auth = initializeAuth(app, {
-    persistence: getReactNativePersistence(ReactNativeAsyncStorage)
-});
+
+export const auth = Platform.OS === 'web' 
+  ? getAuth(app) 
+  : initializeAuth(app, {
+      persistence: getReactNativePersistence(ReactNativeAsyncStorage)
+    });
+
 export const db = getFirestore(app);
