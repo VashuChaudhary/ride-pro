@@ -18,11 +18,31 @@ export interface PricingFactors {
   demandLevel: 'Low' | 'Normal' | 'High' | 'Surge';
 }
 
-/**
- * Simulates a Real-Time ML pricing model (like XGBoost or Random Forest).
- * Applies complex non-linear weights to various contextual features.
- */
-export function predictRidePrice(factors: PricingFactors): { price: number, explanation: string, basePrice: number } {
+export async function predictRidePrice(factors: PricingFactors): Promise<{ price: number, explanation: string, basePrice: number }> {
+  try {
+    const response = await fetch('http://192.168.1.19:5000/predict', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(factors),
+    });
+    
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success) {
+        return {
+          price: data.price,
+          explanation: data.explanation + " (Powered by Real ML Model)",
+          basePrice: data.basePrice
+        };
+      }
+    }
+  } catch (error) {
+    console.warn("Python ML API failed, falling back to local heuristic", error);
+  }
+
+  // --- Fallback logic if Python ML Server is not running ---
   const BASE_FARE = 50;
   const PER_KM_RATE = 15;
   const PER_MINUTE_RATE = 2; // Assuming ~3 mins per km in city traffic
@@ -87,6 +107,6 @@ export function predictRidePrice(factors: PricingFactors): { price: number, expl
   return {
     price: Math.max(50, Math.round(predictedPrice)), // Absolute floor of Rs 50
     basePrice: Math.round(basePrice),
-    explanation: explanation.trim()
+    explanation: explanation.trim() + " (Local Fallback)"
   };
 }

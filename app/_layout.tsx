@@ -7,7 +7,8 @@ export default function RootLayout() {
     <RideProvider>
       <StatusBar style="auto" />
       <Stack>
-        <Stack.Screen name="index" options={{ title: 'Select Role', headerShown: false }} />
+        <Stack.Screen name="index" options={{ title: 'Login', headerShown: false }} />
+        <Stack.Screen name="dashboard" options={{ title: 'Dashboard', headerShown: false }} />
         <Stack.Screen name="passenger" options={{ title: 'Passenger App', headerShown: false }} />
         <Stack.Screen name="driver" options={{ title: 'Driver App', headerShown: false }} />
       </Stack>

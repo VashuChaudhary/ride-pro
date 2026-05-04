@@ -1,0 +1,47 @@
+{
+  "project_info": {
+    "project_number": "720508259433",
+    "project_id": "harshita-ride-pro",
+    "storage_bucket": "harshita-ride-pro.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:720508259433:android:fec191cc841d3f85b7a6f8",
+        "android_client_info": {
+          "package_name": "com.ridepro"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "720508259433-aq4969en0cmjgrh5s8rfq61roh6ia27e.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.ridepro",
+            "certificate_hash": "695424fd9e144329ee915ad5de4b70de7c79cdb4"
+          }
+        },
+        {
+          "client_id": "720508259433-nl75fq85odofnnvbmc22ms5c2fobds1t.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAneWGkPvFVTarb4MrnPKpavt4w9ih96ek"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "720508259433-nl75fq85odofnnvbmc22ms5c2fobds1t.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

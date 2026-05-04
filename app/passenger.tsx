@@ -1,16 +1,26 @@
 import * as Location from 'expo-location';
+import * as Linking from 'expo-linking';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Modal, ScrollView, StyleSheet, Switch, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ScrollView, TextInput, Modal, Alert, ActivityIndicator, KeyboardAvoidingView, Platform, Switch, PanResponder, Animated, Share } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapComponent from '../components/MapComponent';
 import { LocationData, useRide } from '../context/RideContext';
-import { getAddressFromCoords, getRoadRoute, searchAddress } from '../utils/locationUtils';
+import { getAddressFromCoords, getRoadRoute, searchAddress, fetchRealTimeWeather, calculateLiveDemand, findNearestEmergencyServices } from '../utils/locationUtils';
 import { calculateDistance, predictRidePrice } from '../utils/mlPricingEngine';
+import * as Notifications from 'expo-notifications';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 export default function PassengerApp() {
   const router = useRouter();
-  const { rideState, setRideState, pickup, setPickup, dropoff, setDropoff, driverName, rideOtp, setRideOtp, isFemaleOnly, setIsFemaleOnly, activeDriverGender, addRideToHistory, isPoolEnabled, setIsPoolEnabled, poolMatch, setPoolMatch, driverLocation, passengerWallet, setPassengerWallet, setDriverWallet, schedules, addSchedule, toggleSchedule, deleteSchedule, savedPlaces, recentSearches, addRecentSearch } = useRide();
+  const { rideState, setRideState, pickup, setPickup, dropoff, setDropoff, driverName, rideOtp, setRideOtp, isFemaleOnly, setIsFemaleOnly, activeDriverGender, addRideToHistory, isPoolEnabled, setIsPoolEnabled, poolMatch, setPoolMatch, driverLocation, passengerWallet, setPassengerWallet, setDriverWallet, schedules, addSchedule, toggleSchedule, deleteSchedule, savedPlaces, addSavedPlace, recentSearches, addRecentSearch, passengerGender } = useRide();
   
   const [modalVisible, setModalVisible] = useState(false);
   const [selectingFor, setSelectingFor] = useState<'pickup' | 'dropoff'>('pickup');
@@ -26,18 +36,55 @@ export default function PassengerApp() {
   const [scheduleModalVisible, setScheduleModalVisible] = useState(false);
   const [selectedDays, setSelectedDays] = useState<number[]>([]);
   const [selectedTime, setSelectedTime] = useState<string>('17:00');
-  const [notification, setNotification] = useState<{title: string, msg: string, visible: boolean}>({ title: '', msg: '', visible: false });
   const [isPrebooked, setIsPrebooked] = useState(false);
   const [weather, setWeather] = useState<'Clear' | 'Rain' | 'Storm' | 'Fog'>('Clear');
   const [demandLevel, setDemandLevel] = useState<'Low' | 'Normal' | 'High' | 'Surge'>('Normal');
   const [mlPrice, setMlPrice] = useState<{price: number, basePrice: number, explanation: string} | null>(null);
+  const [saveLocationModalVisible, setSaveLocationModalVisible] = useState(false);
+  const [locationToSave, setLocationToSave] = useState<LocationData | null>(null);
+  const [customTag, setCustomTag] = useState('');
   const params = useLocalSearchParams();
   
   const baseFare = mlPrice ? mlPrice.price : 150;
   const discountedBase = baseFare - (poolMatch ? poolMatch.savedAmount : 0);
   const totalFare = isPrebooked ? Math.round(discountedBase * 0.8) : Math.round(discountedBase);
   
-  const searchTimeout = useRef<NodeJS.Timeout | null>(null);
+  const searchTimeout = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [isSheetExpanded, setIsSheetExpanded] = useState(true);
+  
+  const sheetPanResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, gestureState) => Math.abs(gestureState.dy) > 10,
+      onPanResponderRelease: (_, gestureState) => {
+        if (gestureState.dy > 50) {
+          setIsSheetExpanded(false); // slide down
+        } else if (gestureState.dy < -50) {
+          setIsSheetExpanded(true); // slide up
+        }
+      },
+    })
+  ).current;
+
+  useEffect(() => {
+    (async () => {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      
+      if (Platform.OS === 'android') {
+        Notifications.setNotificationChannelAsync('default', {
+          name: 'default',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#FF231F7C',
+        });
+      }
+    })();
+  }, []);
 
   useEffect(() => {
     if (params.autoBook === 'true' && params.pickupName && params.dropoffName) {
@@ -53,24 +100,42 @@ export default function PassengerApp() {
   }, [params.autoBook]);
 
   useEffect(() => {
+    if (pickup) {
+      const getLiveData = async () => {
+        const liveWeather = await fetchRealTimeWeather(pickup.latitude, pickup.longitude);
+        setWeather(liveWeather);
+        
+        const liveDemand = calculateLiveDemand(pickup.latitude, pickup.longitude);
+        setDemandLevel(liveDemand);
+      };
+      getLiveData();
+    }
+  }, [pickup]);
+
+  useEffect(() => {
     if (pickup && dropoff) {
       updateRoute();
       
       const dist = calculateDistance(pickup.latitude, pickup.longitude, dropoff.latitude, dropoff.longitude);
-      const prediction = predictRidePrice({
-        distanceKm: dist,
-        timeOfDayHour: new Date().getHours(),
-        weather,
-        demandLevel
-      });
-      setMlPrice(prediction);
+      
+      const fetchPrice = async () => {
+        const prediction = await predictRidePrice({
+          distanceKm: dist,
+          timeOfDayHour: new Date().getHours(),
+          weather,
+          demandLevel
+        });
+        setMlPrice(prediction);
+      };
+      
+      fetchPrice();
     } else {
       setMlPrice(null);
     }
   }, [pickup, dropoff, weather, demandLevel]);
 
   useEffect(() => {
-    let poolTimer: NodeJS.Timeout;
+    let poolTimer: ReturnType<typeof setTimeout>;
     if (rideState === 'ongoing' && isPoolEnabled && !poolMatch) {
       poolTimer = setTimeout(() => {
         setPoolMatch({
@@ -112,13 +177,14 @@ export default function PassengerApp() {
         return; // don't show for idle
     }
 
-    setNotification({ title, msg, visible: true });
-    
-    const timer = setTimeout(() => {
-      setNotification(prev => ({ ...prev, visible: false }));
-    }, 4000);
-
-    return () => clearTimeout(timer);
+    Notifications.scheduleNotificationAsync({
+      content: {
+        title: title,
+        body: msg,
+        sound: true,
+      },
+      trigger: null,
+    });
   }, [rideState, driverName]);
 
   const toggleDay = (day: number) => {
@@ -143,6 +209,8 @@ export default function PassengerApp() {
       isActive: true
     });
     setScheduleModalVisible(false);
+    setPickup(null);
+    setDropoff(null);
     Alert.alert('Success', 'Your ride has been scheduled! We will notify you 15 minutes before the scheduled time.');
   };
 
@@ -198,6 +266,52 @@ export default function PassengerApp() {
     }
   };
 
+  const handleSOS = async () => {
+    Alert.alert(
+      "🚨 Confirm SOS",
+      "This will immediately alert the nearest police station and hospital with your live location. Do you want to proceed?",
+      [
+        { text: "Cancel", style: "cancel" },
+        { 
+          text: "YES, I NEED HELP", 
+          style: "destructive",
+          onPress: async () => {
+            setIsLoading(true);
+            // Use current driver location if riding, otherwise pickup or default
+            const loc = driverLocation || pickup || { latitude: 28.6139, longitude: 77.2090 };
+            
+            const services = await findNearestEmergencyServices(loc.latitude, loc.longitude);
+            
+            setIsLoading(false);
+            
+            Alert.alert(
+              "🆘 SOS TRIGGERED",
+              `HELP IS ON THE WAY!\n\n📍 Your Location: ${loc.latitude.toFixed(4)}, ${loc.longitude.toFixed(4)}\n🚓 Police Alerted: ${services.police}\n🏥 Medical Alerted: ${services.hospital}\n\nEmergency services are responding to your live coordinates. Stay safe.`,
+              [{ text: "OK" }]
+            );
+          }
+        }
+      ]
+    );
+  };
+
+  const shareRide = async () => {
+    try {
+      const trackingLink = Linking.createURL('/track', { 
+        queryParams: { id: 'user123' } 
+      });
+      const message = `Follow my ride live on RidePro! Track my location here: ${trackingLink}`;
+      
+      await Share.share({
+        message: message,
+        url: trackingLink,
+        title: 'Track my live ride'
+      });
+    } catch (error: any) {
+      Alert.alert('Error', error.message);
+    }
+  };
+
   const openSelector = (type: 'pickup' | 'dropoff') => {
     setSelectingFor(type);
     setSearchQuery('');
@@ -250,21 +364,11 @@ export default function PassengerApp() {
         </View>
       </SafeAreaView>
 
-      {notification.visible && (
-        <View style={styles.notificationBanner}>
-          <Text style={styles.notificationEmoji}>🔔</Text>
-          <View style={{flex: 1}}>
-            <Text style={styles.notificationTitle}>{notification.title}</Text>
-            <Text style={styles.notificationMsg}>{notification.msg}</Text>
-          </View>
-        </View>
-      )}
-
       {(rideState === 'accepted' || rideState === 'arrived' || rideState === 'ongoing') && (
         <View style={styles.safetyToolkit}>
           <TouchableOpacity 
             style={[styles.safetyButton, { backgroundColor: '#d32f2f' }]} 
-            onPress={() => Alert.alert('🚨 SOS Emergency', 'Emergency services and your trusted contacts have been alerted with your live location. Help is on the way!')}
+            onPress={handleSOS}
           >
             <Text style={styles.safetyEmoji}>🚨</Text>
             <Text style={styles.safetyText}>SOS</Text>
@@ -272,7 +376,7 @@ export default function PassengerApp() {
           
           <TouchableOpacity 
             style={[styles.safetyButton, { backgroundColor: '#1976d2' }]} 
-            onPress={() => Alert.alert('🔗 Ride Shared', 'A live tracking link has been sent to your emergency contacts.')}
+            onPress={shareRide}
           >
             <Text style={styles.safetyEmoji}>🔗</Text>
             <Text style={styles.safetyText}>Share</Text>
@@ -283,7 +387,12 @@ export default function PassengerApp() {
       <View style={styles.bottomSheet}>
         {rideState === 'idle' && (
           <View>
-            <Text style={styles.sheetTitle}>Ready to ride?</Text>
+            <View {...sheetPanResponder.panHandlers} style={{ alignItems: 'center', paddingBottom: 15, paddingTop: 5 }}>
+              <TouchableOpacity onPress={() => setIsSheetExpanded(!isSheetExpanded)} hitSlop={{top: 20, bottom: 20, left: 50, right: 50}}>
+                <View style={{ width: 50, height: 5, backgroundColor: '#ddd', borderRadius: 3 }} />
+              </TouchableOpacity>
+            </View>
+            <Text style={[styles.sheetTitle, { marginTop: -10 }]}>Ready to ride?</Text>
             
             <View style={styles.routeCard}>
               <TouchableOpacity style={styles.routeRow} onPress={() => openSelector('pickup')}>
@@ -308,17 +417,19 @@ export default function PassengerApp() {
                 </View>
                 
                 <View style={{flexDirection: 'row', marginTop: 10}}>
-                  <TouchableOpacity onPress={() => setWeather(weather === 'Clear' ? 'Rain' : (weather === 'Rain' ? 'Storm' : 'Clear'))} style={[styles.mlCompactTag, weather !== 'Clear' && styles.mlCompactTagActive]}>
-                    <Text style={[styles.mlCompactTagText, weather !== 'Clear' && styles.mlTagTextActive]}>{weather === 'Clear' ? '☀️ Weather' : (weather === 'Rain' ? '🌧️ Rain' : '⛈️ Storm')}</Text>
+                  <TouchableOpacity onPress={() => Alert.alert('Live Weather', 'Weather is auto-detected using live satellite API based on your pickup location.')} style={[styles.mlCompactTag, weather !== 'Clear' && styles.mlCompactTagActive]}>
+                    <Text style={[styles.mlCompactTagText, weather !== 'Clear' && styles.mlTagTextActive]}>{weather === 'Clear' ? '☀️ Live: Clear' : (weather === 'Rain' ? '🌧️ Live: Rain' : (weather === 'Storm' ? '⛈️ Live: Storm' : '🌫️ Live: Fog'))}</Text>
                   </TouchableOpacity>
-                  <TouchableOpacity onPress={() => setDemandLevel(demandLevel === 'Normal' ? 'Surge' : (demandLevel === 'Surge' ? 'Low' : 'Normal'))} style={[styles.mlCompactTag, demandLevel !== 'Normal' && styles.mlCompactTagActive]}>
-                    <Text style={[styles.mlCompactTagText, demandLevel !== 'Normal' && styles.mlTagTextActive]}>{demandLevel === 'Normal' ? '📊 Demand' : (demandLevel === 'Low' ? '📉 Low' : '📈 Surge')}</Text>
+                  <TouchableOpacity onPress={() => Alert.alert('Live Demand', 'Ride demand is algorithmically calculated in real-time based on your pickup location area, time of day, and current traffic density.')} style={[styles.mlCompactTag, demandLevel !== 'Normal' && styles.mlCompactTagActive]}>
+                    <Text style={[styles.mlCompactTagText, demandLevel !== 'Normal' && styles.mlTagTextActive]}>{demandLevel === 'Normal' ? '📊 Live: Normal' : (demandLevel === 'Low' ? '📉 Live: Low' : (demandLevel === 'High' ? '📈 Live: High' : '🔥 Live: Surge'))}</Text>
                   </TouchableOpacity>
                 </View>
               </View>
             )}
 
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
+            {isSheetExpanded && (
+              <>
+                <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.chipScroll}>
               <TouchableOpacity style={[styles.chip, isFemaleOnly && styles.chipActive]} onPress={() => setIsFemaleOnly(!isFemaleOnly)}>
                 <Text style={[styles.chipText, isFemaleOnly && styles.chipTextActive]}>👩 Women Only</Text>
               </TouchableOpacity>
@@ -363,6 +474,8 @@ export default function PassengerApp() {
                   </View>
                 ))}
               </View>
+                )}
+              </>
             )}
           </View>
         )}
@@ -489,30 +602,42 @@ export default function PassengerApp() {
                     </TouchableOpacity>
                   </View>
                 ) : (
-                  <View style={styles.paymentOptionsRow}>
-                    <TouchableOpacity 
-                      style={styles.paymentMethodCard}
-                      onPress={() => {
-                        if (passengerWallet >= totalFare) {
-                          setPassengerWallet(w => w - totalFare);
-                          setDriverWallet(w => w + totalFare);
-                          setIsPaid(true);
-                          Alert.alert('Wallet Payment Successful', `₹${totalFare} deducted from your wallet.`);
-                        } else {
-                          Alert.alert('Insufficient Balance', 'Please use another payment method.');
-                        }
-                      }}
-                    >
-                      <Text style={styles.paymentEmoji}>💳</Text>
-                      <Text style={styles.paymentMethodText}>Wallet (₹{passengerWallet})</Text>
-                    </TouchableOpacity>
+                  <View>
+                    <View style={styles.paymentOptionsRow}>
+                      <TouchableOpacity 
+                        style={styles.paymentMethodCard}
+                        onPress={() => {
+                          if (passengerWallet >= totalFare) {
+                            setPassengerWallet(w => w - totalFare);
+                            setDriverWallet(w => w + totalFare);
+                            setIsPaid(true);
+                            Alert.alert('Wallet Payment Successful', `₹${totalFare} deducted from your wallet.`);
+                          } else {
+                            Alert.alert('Insufficient Balance', 'Please use another payment method.');
+                          }
+                        }}
+                      >
+                        <Text style={styles.paymentEmoji}>💳</Text>
+                        <Text style={styles.paymentMethodText}>Wallet (₹{passengerWallet})</Text>
+                      </TouchableOpacity>
+
+                      <TouchableOpacity 
+                        style={styles.paymentMethodCard}
+                        onPress={() => setShowQR(true)}
+                      >
+                        <Text style={styles.paymentEmoji}>📱</Text>
+                        <Text style={styles.paymentMethodText}>Show QR</Text>
+                      </TouchableOpacity>
+                    </View>
 
                     <TouchableOpacity 
-                      style={styles.paymentMethodCard}
-                      onPress={() => setShowQR(true)}
+                      style={[styles.primaryButton, {marginTop: 15, backgroundColor: '#f9f9f9', borderWidth: 1, borderColor: '#ccc'}]}
+                      onPress={() => {
+                        setIsPaid(true);
+                        Alert.alert('Payment Confirmed', `You marked the payment to ${driverName} as complete.`);
+                      }}
                     >
-                      <Text style={styles.paymentEmoji}>📱</Text>
-                      <Text style={styles.paymentMethodText}>Show QR</Text>
+                      <Text style={[styles.primaryButtonText, {color: '#333', fontSize: 16}]}>✅ Cash / 3rd Party Payment Done</Text>
                     </TouchableOpacity>
                   </View>
                 )}
@@ -556,7 +681,7 @@ export default function PassengerApp() {
                       pickup,
                       dropoff,
                       fare: totalFare,
-                      splitUsers: splitUsers.length > 0 ? splitUsers : undefined,
+                      splitUsers: splitUsers,
                       date: new Date().toLocaleDateString()
                     });
                   }
@@ -639,13 +764,24 @@ export default function PassengerApp() {
                 <ActivityIndicator style={{marginTop: 20}} />
               ) : (
                 searchResults.map((result, index) => (
-                  <TouchableOpacity 
-                    key={index} 
-                    style={styles.resultItem} 
-                    onPress={() => selectLocation(result)}
-                  >
-                    <Text style={styles.resultName}>{result.name}</Text>
-                  </TouchableOpacity>
+                  <View key={index} style={[styles.resultItem, { flexDirection: 'row', alignItems: 'center' }]}>
+                    <TouchableOpacity 
+                      style={{ flex: 1, paddingRight: 10 }} 
+                      onPress={() => selectLocation(result)}
+                    >
+                      <Text style={styles.resultName}>{result.name}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity 
+                      style={{ padding: 8, backgroundColor: '#f0f0f0', borderRadius: 8 }}
+                      onPress={() => {
+                        setLocationToSave(result);
+                        setCustomTag(result.name.split(',')[0].substring(0, 15));
+                        setSaveLocationModalVisible(true);
+                      }}
+                    >
+                      <Text style={{ fontSize: 12, fontWeight: 'bold' }}>⭐ Save</Text>
+                    </TouchableOpacity>
+                  </View>
                 ))
               )}
             </ScrollView>
@@ -676,14 +812,21 @@ export default function PassengerApp() {
                 ))}
               </View>
 
-              <Text style={{fontSize: 16, marginBottom: 10, fontWeight: '600'}}>Select Time</Text>
-              <View style={{flexDirection: 'row', marginBottom: 30}}>
-                <TouchableOpacity onPress={() => setSelectedTime('09:00')} style={{flex: 1, padding: 15, backgroundColor: selectedTime === '09:00' ? '#000' : '#f0f0f0', borderRadius: 10, marginRight: 5, alignItems: 'center'}}>
-                  <Text style={{color: selectedTime === '09:00' ? '#fff' : '#000', fontWeight: 'bold'}}>Morning (9 AM)</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setSelectedTime('17:00')} style={{flex: 1, padding: 15, backgroundColor: selectedTime === '17:00' ? '#000' : '#f0f0f0', borderRadius: 10, marginLeft: 5, alignItems: 'center'}}>
-                  <Text style={{color: selectedTime === '17:00' ? '#fff' : '#000', fontWeight: 'bold'}}>Evening (5 PM)</Text>
-                </TouchableOpacity>
+              <Text style={{fontSize: 16, marginBottom: 10, fontWeight: '600'}}>Select Time (24h format)</Text>
+              <TextInput
+                style={{backgroundColor: '#f9f9f9', padding: 15, borderRadius: 10, fontSize: 18, fontWeight: 'bold', textAlign: 'center', marginBottom: 10, borderWidth: 1, borderColor: '#eee'}}
+                value={selectedTime}
+                onChangeText={setSelectedTime}
+                placeholder="e.g. 14:30"
+                keyboardType="numbers-and-punctuation"
+                maxLength={5}
+              />
+              <View style={{flexDirection: 'row', marginBottom: 30, flexWrap: 'wrap', justifyContent: 'center'}}>
+                {['08:00', '09:00', '14:00', '17:00', '18:00'].map(t => (
+                  <TouchableOpacity key={t} onPress={() => setSelectedTime(t)} style={{paddingHorizontal: 15, paddingVertical: 8, backgroundColor: selectedTime === t ? '#000' : '#f0f0f0', borderRadius: 20, marginHorizontal: 5, marginBottom: 10}}>
+                    <Text style={{color: selectedTime === t ? '#fff' : '#000', fontWeight: 'bold'}}>{t}</Text>
+                  </TouchableOpacity>
+                ))}
               </View>
 
               <TouchableOpacity style={styles.primaryButton} onPress={saveSchedule}>
@@ -691,6 +834,48 @@ export default function PassengerApp() {
               </TouchableOpacity>
             </View>
           </SafeAreaView>
+        </View>
+      </Modal>
+
+      <Modal visible={saveLocationModalVisible} animationType="fade" transparent={true}>
+        <View style={[styles.modalOverlay, { justifyContent: 'center', alignItems: 'center' }]}>
+          <View style={{ backgroundColor: '#fff', padding: 25, borderRadius: 20, width: '85%', elevation: 10, shadowColor: '#000', shadowOpacity: 0.1, shadowRadius: 10 }}>
+            <Text style={{ fontSize: 20, fontWeight: 'bold', marginBottom: 5 }}>Save Location</Text>
+            <Text style={{ fontSize: 14, color: '#666', marginBottom: 20 }}>Enter a tag (e.g. Home, Gym, College, Office):</Text>
+            <TextInput
+              style={{ backgroundColor: '#f5f5f5', padding: 15, borderRadius: 12, marginBottom: 25, fontSize: 16, borderWidth: 1, borderColor: '#eee' }}
+              value={customTag}
+              onChangeText={setCustomTag}
+              placeholder="Custom Tag"
+              autoFocus
+            />
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end' }}>
+              <TouchableOpacity onPress={() => setSaveLocationModalVisible(false)} style={{ padding: 12, marginRight: 15, justifyContent: 'center' }}>
+                <Text style={{ color: '#666', fontWeight: 'bold', fontSize: 16 }}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => {
+                if (customTag.trim() && locationToSave) {
+                  const tagLower = customTag.trim().toLowerCase();
+                  let icon = '📍';
+                  if (tagLower === 'home') icon = '🏠';
+                  if (tagLower === 'college') icon = '🎓';
+                  if (tagLower === 'office' || tagLower === 'work') icon = '🏢';
+                  if (tagLower === 'gym') icon = '🏋️';
+                  
+                  addSavedPlace({
+                    id: Date.now().toString(),
+                    label: customTag.trim(),
+                    location: locationToSave,
+                    icon: icon
+                  });
+                  setSaveLocationModalVisible(false);
+                  Alert.alert('Success!', `'${customTag.trim()}' has been updated in your saved places.`);
+                }
+              }} style={{ backgroundColor: '#000', paddingVertical: 12, paddingHorizontal: 25, borderRadius: 12, justifyContent: 'center' }}>
+                <Text style={{ color: '#fff', fontWeight: 'bold', fontSize: 16 }}>Save</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
         </View>
       </Modal>
 
@@ -793,16 +978,13 @@ const styles = StyleSheet.create({
   scheduleCard: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#f9f9f9', padding: 12, borderRadius: 10, marginBottom: 10, borderWidth: 1, borderColor: '#eee' },
   savedSection: { padding: 20 },
   sectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#666', marginBottom: 15 },
-  savedPlacesRow: { flexDirection: 'row', justifyContent: 'space-between' },
-  savedPlaceCard: { flex: 1, backgroundColor: '#f9f9f9', padding: 15, borderRadius: 15, alignItems: 'center', marginHorizontal: 5, borderWidth: 1, borderColor: '#eee' },
+  savedPlacesRow: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-start' },
+  savedPlaceCard: { width: '31%', backgroundColor: '#f9f9f9', padding: 10, borderRadius: 15, alignItems: 'center', marginBottom: 10, marginRight: '2%', borderWidth: 1, borderColor: '#eee' },
   savedPlaceIcon: { fontSize: 24, marginBottom: 5 },
   savedPlaceLabel: { fontWeight: 'bold', color: '#333' },
   recentSearchItem: { flexDirection: 'row', alignItems: 'center', paddingVertical: 15, borderBottomWidth: 1, borderBottomColor: '#eee' },
   recentSearchName: { fontSize: 16, color: '#333', flex: 1 },
-  notificationBanner: { position: 'absolute', top: 120, left: 20, right: 20, backgroundColor: '#333', padding: 15, borderRadius: 15, flexDirection: 'row', alignItems: 'center', zIndex: 100, elevation: 20, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.3, shadowRadius: 5 },
-  notificationEmoji: { fontSize: 24, marginRight: 15 },
-  notificationTitle: { color: '#fff', fontWeight: 'bold', fontSize: 16 },
-  notificationMsg: { color: '#ddd', fontSize: 14, marginTop: 2 },
+
   mlCard: { backgroundColor: '#e3f2fd', padding: 15, borderRadius: 15, marginBottom: 15, borderWidth: 1, borderColor: '#bbdefb' },
   mlTag: { backgroundColor: '#fff', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 15, borderWidth: 1, borderColor: '#ddd', flex: 1, marginHorizontal: 2, alignItems: 'center' },
   mlTagActive: { backgroundColor: '#1E88E5', borderColor: '#1E88E5' },

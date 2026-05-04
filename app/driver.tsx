@@ -5,6 +5,15 @@ import MapComponent from '../components/MapComponent';
 import { useRouter } from 'expo-router';
 import { useRide } from '../context/RideContext';
 import { getRoadRoute } from '../utils/locationUtils';
+import * as Notifications from 'expo-notifications';
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: false,
+  }),
+});
 
 export default function DriverApp() {
   const router = useRouter();
@@ -13,13 +22,74 @@ export default function DriverApp() {
   const [inputOtp, setInputOtp] = useState('');
 
   useEffect(() => {
+    (async () => {
+      const { status: existingStatus } = await Notifications.getPermissionsAsync();
+      let finalStatus = existingStatus;
+      if (existingStatus !== 'granted') {
+        const { status } = await Notifications.requestPermissionsAsync();
+        finalStatus = status;
+      }
+      
+      if (Platform.OS === 'android') {
+        Notifications.setNotificationChannelAsync('default', {
+          name: 'default',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#FF231F7C',
+        });
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    let title = '';
+    let msg = '';
+    
+    const excluded = rideState === 'searching' && isFemaleOnly && activeDriverGender !== 'female';
+
+    switch (rideState) {
+      case 'searching':
+        if (!excluded) {
+          title = 'New Ride Request!';
+          msg = `${passengerName} needs a ride to their destination.`;
+        }
+        break;
+      case 'accepted':
+        title = 'Ride Accepted';
+        msg = `Head towards the pickup location.`;
+        break;
+      case 'arrived':
+        title = 'Arrived at Pickup';
+        msg = `Ask ${passengerName} for the 4-digit OTP.`;
+        break;
+      case 'ongoing':
+        title = 'Ride Started';
+        msg = `Follow the route to the destination.`;
+        break;
+      case 'completed':
+        title = 'Ride Completed';
+        msg = 'Earnings have been added to your wallet.';
+        break;
+      default:
+        return;
+    }
+
+    if (title) {
+      Notifications.scheduleNotificationAsync({
+        content: { title, body: msg, sound: true },
+        trigger: null,
+      });
+    }
+  }, [rideState, passengerName, isFemaleOnly, activeDriverGender]);
+
+  useEffect(() => {
     if (pickup && dropoff) {
       updateRoute();
     }
   }, [pickup, dropoff]);
 
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: ReturnType<typeof setInterval>;
 
     if (rideState === 'accepted' && pickup) {
       setDriverLocation({
@@ -104,10 +174,7 @@ export default function DriverApp() {
               <Text style={styles.walletEmoji}>💳</Text>
               <Text style={styles.walletText}>₹{driverWallet}</Text>
             </View>
-            <TouchableOpacity 
-              style={styles.driverProfileBadge} 
-              onPress={() => setActiveDriverGender(activeDriverGender === 'male' ? 'female' : 'male')}
-            >
+            <View style={styles.driverProfileBadge}>
                <Text style={{fontSize: 16}}>{activeDriverGender === 'female' ? '👩' : '👨'}</Text>
                <View style={{marginLeft: 8}}>
                   <Text style={{fontWeight: 'bold', fontSize: 14}}>{driverName}</Text>
@@ -115,7 +182,7 @@ export default function DriverApp() {
                     {activeDriverGender === 'female' ? 'Female' : 'Male'}
                   </Text>
                </View>
-            </TouchableOpacity>
+            </View>
           </View>
         </View>
       </SafeAreaView>

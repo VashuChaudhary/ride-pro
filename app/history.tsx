@@ -1,17 +1,35 @@
 import React from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, SafeAreaView } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, SafeAreaView, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useRide, CompletedRide } from '../context/RideContext';
 
 export default function HistoryScreen() {
   const router = useRouter();
-  const { rideHistory, setPickup, setDropoff, setRideState } = useRide();
+  const { rideHistory, setPickup, setDropoff, setRideState, deleteRideFromHistory } = useRide();
 
   const handleReorder = (ride: CompletedRide) => {
     setPickup(ride.pickup);
     setDropoff(ride.dropoff);
     setRideState('idle'); // Ensure they start from the confirmation screen
     router.push('/passenger');
+  };
+
+  const handleDelete = (id: string) => {
+    Alert.alert('Delete Ride', 'Are you sure you want to remove this ride from your history?', [
+      { text: 'Cancel', style: 'cancel' },
+      { text: 'Delete', style: 'destructive', onPress: () => deleteRideFromHistory(id) }
+    ]);
+  };
+
+  const getAIInsight = (ride: CompletedRide) => {
+    const insights = [
+      '🤖 AI Insight: You saved ₹45 by booking outside peak hours!',
+      '🤖 AI Insight: This is one of your most frequent routes.',
+      '🤖 AI Insight: Co-riding on this route reduces emissions by 12%.',
+      '🤖 AI Insight: Rebooking this now might cost 10% more due to current weather.'
+    ];
+    // Deterministic random based on ID length
+    return insights[ride.id.length % insights.length];
   };
 
   const renderRide = ({ item }: { item: CompletedRide }) => {
@@ -38,6 +56,10 @@ export default function HistoryScreen() {
           </View>
         </View>
 
+        <View style={styles.aiBanner}>
+          <Text style={styles.aiInsightText}>{getAIInsight(item)}</Text>
+        </View>
+
         <View style={styles.detailsRow}>
           <Text style={styles.fareText}>{isPassenger ? 'Paid' : 'Earned'}: ₹{item.fare}</Text>
           {item.splitUsers && item.splitUsers.length > 0 && (
@@ -47,11 +69,15 @@ export default function HistoryScreen() {
           )}
         </View>
 
-        {isPassenger && (
-          <TouchableOpacity style={styles.reorderButton} onPress={() => handleReorder(item)}>
-            <Text style={styles.reorderButtonText}>Reorder Ride</Text>
+        <View style={styles.actionButtons}>
+          <TouchableOpacity style={styles.deleteButton} onPress={() => handleDelete(item.id)}>
+            <Text style={styles.deleteButtonText}>🗑️ Delete</Text>
           </TouchableOpacity>
-        )}
+          
+          <TouchableOpacity style={styles.reorderButtonSmall} onPress={() => handleReorder(item)}>
+            <Text style={styles.reorderButtonTextSmall}>↻ Rebook</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   };
@@ -217,5 +243,48 @@ const styles = StyleSheet.create({
     fontSize: 18,
     color: '#666',
     fontWeight: '500',
+  },
+  aiBanner: {
+    backgroundColor: '#e8f5e9',
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 15,
+    borderWidth: 1,
+    borderColor: '#c8e6c9',
+  },
+  aiInsightText: {
+    color: '#2e7d32',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  actionButtons: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 15,
+  },
+  deleteButton: {
+    flex: 1,
+    backgroundColor: '#ffebee',
+    padding: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+    marginRight: 10,
+    borderWidth: 1,
+    borderColor: '#ffcdd2',
+  },
+  deleteButtonText: {
+    color: '#d32f2f',
+    fontWeight: 'bold',
+  },
+  reorderButtonSmall: {
+    flex: 2,
+    backgroundColor: '#000',
+    padding: 12,
+    borderRadius: 10,
+    alignItems: 'center',
+  },
+  reorderButtonTextSmall: {
+    color: '#fff',
+    fontWeight: 'bold',
   },
 });

@@ -104,3 +104,88 @@ export const getRoadRoute = async (start: {lat: number, lon: number}, end: {lat:
     return [];
   }
 };
+
+export const fetchRealTimeWeather = async (lat: number, lon: number): Promise<'Clear' | 'Rain' | 'Storm' | 'Fog'> => {
+  try {
+    const response = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true`);
+    if (!response.ok) return 'Clear';
+    const data = await response.json();
+    const weatherCode = data.current_weather?.weathercode;
+    
+    if (weatherCode === undefined) return 'Clear';
+
+    // Map WMO codes to our factors
+    // Fog (45, 48)
+    if (weatherCode === 45 || weatherCode === 48) return 'Fog';
+    
+    // Storm (95, 96, 99)
+    if ([95, 96, 99].includes(weatherCode)) return 'Storm';
+    
+    // Rain/Snow/Showers (51-86)
+    if (weatherCode >= 51 && weatherCode <= 86) return 'Rain';
+
+    return 'Clear';
+  } catch (error) {
+    console.error("Failed to fetch real-time weather", error);
+    return 'Clear';
+  }
+};
+
+export const calculateLiveDemand = (lat: number, lon: number): 'Low' | 'Normal' | 'High' | 'Surge' => {
+  const date = new Date();
+  const hour = date.getHours();
+  const day = date.getDay(); // 0 is Sunday, 6 is Saturday
+
+  // Create a pseudo-random stable seed based on current hour + lat + lon
+  // This ensures the demand is stable for an hour in a specific location, but varies organically across the city
+  const seed = Math.floor(lat * 100) + Math.floor(lon * 100) + hour;
+  const rand = (Math.sin(seed) + 1) / 2; // 0.0 to 1.0
+
+  let baseDemandScore = rand;
+
+  // Time-based weighting
+  if (hour >= 8 && hour <= 10) {
+    baseDemandScore += 0.4; // Morning rush
+  } else if (hour >= 17 && hour <= 20) {
+    baseDemandScore += 0.5; // Evening rush
+  } else if (hour >= 23 || hour <= 4) {
+    // Late night
+    if (day === 0 || day === 6) {
+      baseDemandScore += 0.3; // Weekend late night (parties, etc.)
+    } else {
+      baseDemandScore -= 0.3; // Weekday late night
+    }
+  }
+
+  // Location-based weighting (Delhi Center ~ 28.61, 77.23)
+  const distFromCenter = Math.sqrt(Math.pow(lat - 28.61, 2) + Math.pow(lon - 77.23, 2));
+  if (distFromCenter < 0.05) {
+    baseDemandScore += 0.2; // Central areas always have higher demand
+  } else if (distFromCenter > 0.15) {
+    baseDemandScore -= 0.2; // Far outskirts have lower demand
+  }
+
+  // Final mapping
+  if (baseDemandScore > 1.2) return 'Surge';
+  if (baseDemandScore > 0.8) return 'High';
+  if (baseDemandScore < 0.3) return 'Low';
+  return 'Normal';
+};
+
+export const findNearestEmergencyServices = async (lat: number, lon: number) => {
+  try {
+    const hospitalUrl = `https://photon.komoot.io/api/?q=hospital&lat=${lat}&lon=${lon}&limit=1`;
+    const policeUrl = `https://photon.komoot.io/api/?q=police&lat=${lat}&lon=${lon}&limit=1`;
+    
+    const [hResp, pResp] = await Promise.all([fetch(hospitalUrl), fetch(policeUrl)]);
+    const hData = await hResp.json();
+    const pData = await pResp.json();
+    
+    const hospital = hData.features?.[0]?.properties?.name || "Nearest City Hospital";
+    const police = pData.features?.[0]?.properties?.name || "District Police HQ";
+    
+    return { hospital, police };
+  } catch (error) {
+    return { hospital: "Nearest Medical Center", police: "Police Control Room" };
+  }
+};
