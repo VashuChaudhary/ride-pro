@@ -8,6 +8,7 @@ import MapComponent from '../components/MapComponent';
 import { LocationData, useRide } from '../context/RideContext';
 import { getAddressFromCoords, getRoadRoute, searchAddress, fetchRealTimeWeather, calculateLiveDemand, findNearestEmergencyServices } from '../utils/locationUtils';
 import { calculateDistance, predictRidePrice } from '../utils/mlPricingEngine';
+import RideComparison from '../components/RideComparison';
 import * as Notifications from 'expo-notifications';
 
 Notifications.setNotificationHandler({
@@ -386,7 +387,7 @@ export default function PassengerApp() {
 
       <View style={styles.bottomSheet}>
         {rideState === 'idle' && (
-          <View>
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 20 }}>
             <View {...sheetPanResponder.panHandlers} style={{ alignItems: 'center', paddingBottom: 15, paddingTop: 5 }}>
               <TouchableOpacity onPress={() => setIsSheetExpanded(!isSheetExpanded)} hitSlop={{top: 20, bottom: 20, left: 50, right: 50}}>
                 <View style={{ width: 50, height: 5, backgroundColor: '#ddd', borderRadius: 3 }} />
@@ -407,24 +408,33 @@ export default function PassengerApp() {
             </View>
 
             {pickup && dropoff && mlPrice && (
-              <View style={styles.mlCard}>
-                <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}}>
-                  <View style={{flex: 1, paddingRight: 10}}>
-                    <Text style={{fontWeight: '900', color: '#1E88E5', fontSize: 14}}>🤖 AI Pricing</Text>
-                    <Text style={{fontSize: 10, color: '#666', fontStyle: 'italic'}} numberOfLines={2}>{mlPrice.explanation}</Text>
+              <>
+                <View style={styles.mlCard}>
+                  <View style={{flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center'}}>
+                    <View style={{flex: 1, paddingRight: 10}}>
+                      <Text style={{fontWeight: '900', color: '#1E88E5', fontSize: 14}}>🤖 AI Pricing</Text>
+                      <Text style={{fontSize: 10, color: '#666', fontStyle: 'italic'}} numberOfLines={2}>{mlPrice.explanation}</Text>
+                    </View>
+                    <Text style={{fontWeight: '900', fontSize: 24}}>₹{mlPrice.price}</Text>
                   </View>
-                  <Text style={{fontWeight: '900', fontSize: 24}}>₹{mlPrice.price}</Text>
+                  
+                  <View style={{flexDirection: 'row', marginTop: 10}}>
+                    <TouchableOpacity onPress={() => Alert.alert('Live Weather', 'Weather is auto-detected using live satellite API based on your pickup location.')} style={[styles.mlCompactTag, weather !== 'Clear' && styles.mlCompactTagActive]}>
+                      <Text style={[styles.mlCompactTagText, weather !== 'Clear' && styles.mlTagTextActive]}>{weather === 'Clear' ? '☀️ Live: Clear' : (weather === 'Rain' ? '🌧️ Live: Rain' : (weather === 'Storm' ? '⛈️ Live: Storm' : '🌫️ Live: Fog'))}</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => Alert.alert('Live Demand', 'Ride demand is algorithmically calculated in real-time based on your pickup location area, time of day, and current traffic density.')} style={[styles.mlCompactTag, demandLevel !== 'Normal' && styles.mlCompactTagActive]}>
+                      <Text style={[styles.mlCompactTagText, demandLevel !== 'Normal' && styles.mlTagTextActive]}>{demandLevel === 'Normal' ? '📊 Live: Normal' : (demandLevel === 'Low' ? '📉 Live: Low' : (demandLevel === 'High' ? '📈 Live: High' : '🔥 Live: Surge'))}</Text>
+                    </TouchableOpacity>
+                  </View>
                 </View>
-                
-                <View style={{flexDirection: 'row', marginTop: 10}}>
-                  <TouchableOpacity onPress={() => Alert.alert('Live Weather', 'Weather is auto-detected using live satellite API based on your pickup location.')} style={[styles.mlCompactTag, weather !== 'Clear' && styles.mlCompactTagActive]}>
-                    <Text style={[styles.mlCompactTagText, weather !== 'Clear' && styles.mlTagTextActive]}>{weather === 'Clear' ? '☀️ Live: Clear' : (weather === 'Rain' ? '🌧️ Live: Rain' : (weather === 'Storm' ? '⛈️ Live: Storm' : '🌫️ Live: Fog'))}</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity onPress={() => Alert.alert('Live Demand', 'Ride demand is algorithmically calculated in real-time based on your pickup location area, time of day, and current traffic density.')} style={[styles.mlCompactTag, demandLevel !== 'Normal' && styles.mlCompactTagActive]}>
-                    <Text style={[styles.mlCompactTagText, demandLevel !== 'Normal' && styles.mlTagTextActive]}>{demandLevel === 'Normal' ? '📊 Live: Normal' : (demandLevel === 'Low' ? '📉 Live: Low' : (demandLevel === 'High' ? '📈 Live: High' : '🔥 Live: Surge'))}</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
+
+                {isSheetExpanded && (
+                  <RideComparison 
+                    rideProPrice={mlPrice.price} 
+                    distanceKm={calculateDistance(pickup.latitude, pickup.longitude, dropoff.latitude, dropoff.longitude)} 
+                  />
+                )}
+              </>
             )}
 
             {isSheetExpanded && (
@@ -477,7 +487,7 @@ export default function PassengerApp() {
                 )}
               </>
             )}
-          </View>
+          </ScrollView>
         )}
 
         {rideState === 'searching' && (
